@@ -291,6 +291,12 @@ function imageryPinOption(key, token) {
 }
 
 const OPTION_GROUPS = Object.freeze({
+  'au-fire-warnings': Object.freeze([
+    enumOption('show', 's', 'all', ['all', 'warnings'], {
+      all: 'a',
+      warnings: 'w',
+    }),
+  ]),
   'weather-lightning': Object.freeze([
     enumOption('opacity', 'o', 'strong', ['light', 'strong'], {
       light: 'l',
@@ -464,6 +470,12 @@ export const LAYER_STATE_REGISTRY = Object.freeze([
     id: 'alpr-cameras',
     token: 'p',
     disposition: 'enabled-only',
+  }),
+  Object.freeze({
+    id: 'au-fire-warnings',
+    token: '3',
+    disposition: 'enabled+options',
+    optionOwner: 'au-fire-warnings',
   }),
   Object.freeze({
     id: 'bhote-koshi-2026',

@@ -95,6 +95,14 @@ export const DATA_CREDITS = [
       '<a href="https://inciweb.wildfire.gov/" target="_blank" rel="noopener">InciWeb</a>',
   },
   {
+    key: 'au-fire-warnings',
+    html:
+      'Australian fire warnings: ' +
+      '<a href="https://www.rfs.nsw.gov.au/" target="_blank" rel="noopener">NSW Rural Fire Service</a>' +
+      ' · <a href="https://emergency.vic.gov.au/" target="_blank" rel="noopener">VicEmergency (Emergency Management Victoria)</a>' +
+      ' · <a href="https://www.fire.qld.gov.au/" target="_blank" rel="noopener">Queensland Fire Department</a>',
+  },
+  {
     key: 'overpass',
     html:
       'Road geometry (traffic): ' +
