@@ -1,6 +1,7 @@
 import * as Cesium from 'cesium';
 import { createWeatherRendering } from './rendering.js';
 import { imageryHostStatus } from './imageryHost.js';
+import { createRainViewerRadar, RAINVIEWER_MAX_LEVEL } from './rainViewer.js';
 import {
   RADAR_MAX_GAP_MS,
   REGIONAL_INFRARED_MAX_GAP_MS,
@@ -39,6 +40,7 @@ export function createWeatherLayer({
   id = 'weather-radar',
   cesium = Cesium,
   createRendering = createWeatherRendering,
+  createWorldRadar = createRainViewerRadar,
   documentRef = globalThis.document,
   eventTarget = globalThis.window,
   matchMedia = globalThis.matchMedia?.bind(globalThis),
@@ -51,6 +53,9 @@ export function createWeatherLayer({
   let product = radar ? 'radar' : lightning ? 'lightning' : 'clouds-regional';
   let opacity = 'strong';
   let infrared = 'filtered';
+  // Rain radar's World region: RainViewer tiles instead of the NOAA frames.
+  let worldRadar = null;
+  const world = () => radar && product === 'radar-world';
   let viewer = null,
     rendering = null,
     manifest = null,
@@ -87,6 +92,8 @@ export function createWeatherLayer({
     imageryHost?.() ?? { collection: viewer?.imageryLayers, kind: 'globe' };
   const notify = () => listener?.();
   const shownTime = () => (noFrame ? null : rendering?.getDiagnostics().time);
+  const displayTime = () =>
+    world() ? (worldRadar?.getState().time ?? null) : shownTime();
   const unsubscribeClock = clock?.subscribe(() => {
     if (!clock.getState().playing || suspended()) rendering?.cancelPrefetch?.();
     notify();
@@ -117,6 +124,7 @@ export function createWeatherLayer({
     hostCollection = host.collection;
     hostStatus = status;
     hostHidden = status !== null;
+    worldRadar?.setHidden(hostHidden || !world());
     // Keep playback intent and the displayed time while the host is unavailable.
     if (!changed || !rendering) return;
     ++generation;
@@ -162,7 +170,8 @@ export function createWeatherLayer({
     }, 2000);
   }
   async function applyClockTime(time, { signal }) {
-    if (!enabled || signal.aborted) return false;
+    // World radar shows RainViewer's latest frame; the NOAA clock skips it.
+    if (!enabled || signal.aborted || world()) return false;
     if (time !== null) return show(time, signal);
     ++generation;
     frameRequest?.abort();
@@ -180,7 +189,7 @@ export function createWeatherLayer({
       get maxGapMs() {
         return maxGap();
       },
-      getTimes: () => manifest?.times ?? [],
+      getTimes: () => (world() ? [] : (manifest?.times ?? [])),
       getShownTime: shownTime,
       apply: applyClockTime,
       isSuspended: suspended,
@@ -204,7 +213,7 @@ export function createWeatherLayer({
   }
   async function show(time, signal) {
     checkHost(false);
-    if (!enabled || hostHidden || !manifest?.times?.includes(time))
+    if (!enabled || world() || hostHidden || !manifest?.times?.includes(time))
       return false;
     signal?.throwIfAborted();
     frameRequest?.abort();
@@ -271,6 +280,11 @@ export function createWeatherLayer({
         onMapStackChanged,
       );
       rendering.setAlpha(opacity === 'light' ? 0.4 : satellite ? 0.7 : 0.8);
+      if (radar) {
+        worldRadar = createWorldRadar({ cesium, getHost, onChange: notify });
+        worldRadar.setAlpha(opacity === 'light' ? 0.4 : 0.8);
+        worldRadar.setHidden(!world());
+      }
       motion = matchMedia?.('(prefers-reduced-motion: reduce)');
       motion?.addEventListener?.('change', onVisibility);
       documentRef?.addEventListener?.('visibilitychange', onVisibility);
@@ -308,6 +322,7 @@ export function createWeatherLayer({
       request = null;
       stop();
       rendering?.clear();
+      worldRadar?.clear();
       manifest = null;
       loading = false;
       error = null;
@@ -316,6 +331,11 @@ export function createWeatherLayer({
     async update(_viewer, { signal } = {}) {
       if (!enabled) return false;
       checkHost(false);
+      if (world()) {
+        worldRadar.setHidden(hostHidden);
+        await worldRadar.refresh({ signal });
+        return enabled && !signal?.aborted;
+      }
       clearTimeout(timer);
       timer = null;
       request?.abort();
@@ -390,13 +410,17 @@ export function createWeatherLayer({
       if (['light', 'strong'].includes(params.opacity)) {
         opacity = params.opacity;
         rendering?.setAlpha(opacity === 'light' ? 0.4 : satellite ? 0.7 : 0.8);
+        worldRadar?.setAlpha(opacity === 'light' ? 0.4 : 0.8);
       }
       if (
-        satellite &&
-        ['clouds', 'clouds-regional'].includes(params.product) &&
+        ((satellite &&
+          ['clouds', 'clouds-regional'].includes(params.product)) ||
+          (radar && ['radar', 'radar-world'].includes(params.product))) &&
         params.product !== product
       ) {
         product = params.product;
+        worldRadar?.clear();
+        worldRadar?.setHidden(hostHidden || !world());
         ++generation;
         frameRequest?.abort();
         frameRequest = null;
@@ -475,7 +499,7 @@ export function createWeatherLayer({
     },
     getParams() {
       return radar
-        ? { opacity }
+        ? { product, opacity }
         : satellite
           ? { product, opacity, infrared }
           : { product, opacity };
@@ -489,9 +513,10 @@ export function createWeatherLayer({
         shared.products.find((entry) => entry.id === id)?.selected === null
           ? `No frame within ${maxGap() / 60_000 < 60 ? `${maxGap() / 60_000} min` : `${maxGap() / 3600_000} h`} of ${utc(shared.target)}`
           : null;
-      const time = shownTime();
+      const time = displayTime();
+      const worldState = world() ? worldRadar?.getState() : null;
       const relation =
-        shared?.mode === 'history' && time
+        !world() && shared?.mode === 'history' && time
           ? Date.parse(time) === Date.parse(shared.target)
             ? ' · synced'
             : Date.parse(time) < Date.parse(shared.target)
@@ -528,6 +553,7 @@ export function createWeatherLayer({
       const lon = camera ? cesium.Math.toDegrees(camera.longitude) : 0;
       const lat = camera ? cesium.Math.toDegrees(camera.latitude) : 0;
       const outside =
+        !world() &&
         b &&
         camera &&
         (lon < b.west ||
@@ -538,42 +564,74 @@ export function createWeatherLayer({
       const controls = {
         readout: true,
         summary: {
-          label: radar
-            ? 'Rain radar · US'
-            : lightning
-              ? 'Lightning density · 15 min'
-              : 'Satellite clouds',
-          coverage: radar
-            ? 'CONUS'
-            : lightning
-              ? 'Americas + Pacific'
-              : product === 'clouds'
-                ? 'Global · 60°S–60°N'
-                : 'North America',
+          label: world()
+            ? 'Rain radar · World'
+            : radar
+              ? 'Rain radar · US'
+              : lightning
+                ? 'Lightning density · 15 min'
+                : 'Satellite clouds',
+          coverage: world()
+            ? 'Global radar network'
+            : radar
+              ? 'CONUS'
+              : lightning
+                ? 'Americas + Pacific'
+                : product === 'clouds'
+                  ? 'Global · 60°S–60°N'
+                  : 'North America',
           shownTime: time,
           maxGapMinutes: maxGap() / 60_000,
-          detail: time
-            ? `${followLatest ? 'Observed' : 'History'} · ${utc(time)} · ${lag}${relation}`
-            : missing
-              ? 'Observation unavailable'
-              : 'Waiting for observation',
-          status:
-            missing ||
-            hostStatus ||
-            error ||
-            diagnostic?.error ||
-            (observationDelayed()
-              ? 'Source observations delayed'
-              : manifest?.stale
-                ? 'Stale source'
-                : loading
-                  ? 'Loading next frame…'
-                  : outside
-                    ? 'Map center outside coverage'
-                    : null),
-          units: radar ? 'dBZ' : lightning ? 'strikes/km²/min ×10³' : '',
+          detail: worldState
+            ? time
+              ? `Observed · ${utc(time)} · ${lag} · RainViewer`
+              : 'Waiting for RainViewer'
+            : time
+              ? `${followLatest ? 'Observed' : 'History'} · ${utc(time)} · ${lag}${relation}`
+              : missing
+                ? 'Observation unavailable'
+                : 'Waiting for observation',
+          status: worldState
+            ? hostStatus ||
+              worldState.error ||
+              (worldState.loading ? 'Loading latest frame…' : null)
+            : missing ||
+              hostStatus ||
+              error ||
+              diagnostic?.error ||
+              (observationDelayed()
+                ? 'Source observations delayed'
+                : manifest?.stale
+                  ? 'Stale source'
+                  : loading
+                    ? 'Loading next frame…'
+                    : outside
+                      ? 'Map center outside coverage'
+                      : null),
+          units: world()
+            ? ''
+            : radar
+              ? 'dBZ'
+              : lightning
+                ? 'strikes/km²/min ×10³'
+                : '',
         },
         chips: [
+          ...(radar
+            ? [
+                ['radar', 'US'],
+                ['radar-world', 'World'],
+              ].map(([value, label]) => ({
+                id: value,
+                label,
+                active: product === value,
+                params: { product: value },
+                title:
+                  value === 'radar-world'
+                    ? 'RainViewer global radar composite; latest frame, about 10-minute updates; personal use only'
+                    : 'NOAA MRMS contiguous-US radar; about 4-minute updates with history',
+              }))
+            : []),
           ...(satellite
             ? [
                 ['clouds-regional', 'N. America'],
@@ -622,12 +680,12 @@ export function createWeatherLayer({
               : lightning
                 ? 'View Americas & Pacific'
                 : 'View coverage',
-            disabled: !manifest || !runNavigation,
+            disabled: world() || !manifest || !runNavigation,
             params: { focus: true },
           },
         ],
         legend:
-          radar || lightning
+          (radar && !world()) || lightning
             ? (lightning ? LIGHTNING_STOPS : STOPS).map(([label, color]) => ({
                 label: String(label),
                 color,
@@ -638,14 +696,27 @@ export function createWeatherLayer({
             : [],
         info: hostHidden
           ? hostStatus
-          : `${radar ? 'RADAR REFLECTIVITY · dBZ' : lightning ? 'LIGHTNING DENSITY · 15 min accumulation' : product === 'clouds' ? 'GLOBAL INFRARED · hourly' : 'GOES INFRARED · ~5 min'}\n${time ? `${followLatest ? 'Latest observation' : 'History'}: ${utc(time)}\n${lag}${current && !followLatest ? ` · frame ${index + 1}/${times.length}` : ''}${loading ? ' · loading' : ''}` : `Observation: unavailable${loading ? ' · loading' : ''}`}${missing ? `\n${missing}` : ''}${manifest?.stale ? '\nSTALE · cached source metadata' : ''}${error || diagnostic?.error ? '\n' + (error || diagnostic.error) : ''}\n${radar ? 'Contiguous US · gaps ≠ no rain' : lightning ? 'Americas + Pacific · not individual strikes\nColor: strikes/km²/min ×10³' : product === 'clouds' ? '60°S–60°N · typically 2–3 h delayed' : 'North America · infrared imagery'}${outside ? '\nMap center is outside source coverage' : ''}${motion?.matches ? (clock ? '\nReduced motion · history playback unavailable' : '\nReduced motion · manual history available') : ''}`,
-        infoTitle: lightning
-          ? 'NOAA/NWS 15-minute lightning density derived from Vaisala NLDN/GLD360. Coverage 110°E across the Pacific/Americas to 0°, 25°S–80°N. Not a live strike count, global coverage or a safety warning.'
-          : radar
-            ? 'NOAA MRMS radar echoes indicate precipitation patterns, not rain rate, a storm warning or a future forecast. Native source approximately 1 km; display is limited to level 6. Frames use exact advertised observation times.'
-            : 'GOES-19/18 longwave infrared Band 14 regional; NESDIS global longwave mosaic. Clouds only dims everything but bright, cold cloud tops; a brightness filter, not a cloud mask. Coverage and freshness differ by region.',
+          : worldState
+            ? `WORLD RADAR · RainViewer\n${time ? `Latest frame: ${utc(time)}\n${lag}` : 'Frame: unavailable'}${worldState.loading ? ' · loading' : ''}${worldState.error ? `\n${worldState.error}` : ''}\nGlobal composite of national radar networks · gaps ≠ no rain\nDetail limited to zoom level ${RAINVIEWER_MAX_LEVEL} · no history playback\nRadar data © RainViewer · personal use only`
+            : `${radar ? 'RADAR REFLECTIVITY · dBZ' : lightning ? 'LIGHTNING DENSITY · 15 min accumulation' : product === 'clouds' ? 'GLOBAL INFRARED · hourly' : 'GOES INFRARED · ~5 min'}\n${time ? `${followLatest ? 'Latest observation' : 'History'}: ${utc(time)}\n${lag}${current && !followLatest ? ` · frame ${index + 1}/${times.length}` : ''}${loading ? ' · loading' : ''}` : `Observation: unavailable${loading ? ' · loading' : ''}`}${missing ? `\n${missing}` : ''}${manifest?.stale ? '\nSTALE · cached source metadata' : ''}${error || diagnostic?.error ? '\n' + (error || diagnostic.error) : ''}\n${radar ? 'Contiguous US · gaps ≠ no rain' : lightning ? 'Americas + Pacific · not individual strikes\nColor: strikes/km²/min ×10³' : product === 'clouds' ? '60°S–60°N · typically 2–3 h delayed' : 'North America · infrared imagery'}${outside ? '\nMap center is outside source coverage' : ''}${motion?.matches ? (clock ? '\nReduced motion · history playback unavailable' : '\nReduced motion · manual history available') : ''}`,
+        infoTitle: world()
+          ? 'RainViewer global radar composite from 1,200+ radars in 150+ countries. Shows the newest past frame (10-minute steps). Free RainViewer API for personal or educational use; coverage depends on each country sharing its radar.'
+          : lightning
+            ? 'NOAA/NWS 15-minute lightning density derived from Vaisala NLDN/GLD360. Coverage 110°E across the Pacific/Americas to 0°, 25°S–80°N. Not a live strike count, global coverage or a safety warning.'
+            : radar
+              ? 'NOAA MRMS radar echoes indicate precipitation patterns, not rain rate, a storm warning or a future forecast. Native source approximately 1 km; display is limited to level 6. Frames use exact advertised observation times.'
+              : 'GOES-19/18 longwave infrared Band 14 regional; NESDIS global longwave mosaic. Clouds only dims everything but bright, cold cloud tops; a brightness filter, not a cloud mask. Coverage and freshness differ by region.',
       };
       controls.summary.settings = [
+        ...(radar
+          ? [
+              {
+                id: 'region',
+                label: 'REGION',
+                chips: controls.chips.filter(({ params }) => params.product),
+              },
+            ]
+          : []),
         ...(satellite
           ? [
               {
@@ -675,6 +746,19 @@ export function createWeatherLayer({
       listener = typeof value === 'function' ? value : null;
     },
     getStats() {
+      if (world()) {
+        const state = worldRadar?.getState() ?? {};
+        return {
+          count: state.time ? 1 : 0,
+          countLabel: 'Observed',
+          lastUpdate: state.time ? Date.parse(state.time) : null,
+          loading: Boolean(state.loading),
+          error: state.error ?? null,
+          stale: false,
+          source: 'RainViewer',
+          observedAt: state.time ?? null,
+        };
+      }
       return {
         count: shownTime() ? 1 : 0,
         countLabel: isLatest() ? 'Observed' : 'History',
@@ -720,6 +804,7 @@ export function createWeatherLayer({
       imageryHost = null;
       viewer = null;
       rendering = null;
+      worldRadar = null;
       listener = null;
     },
   };

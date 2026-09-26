@@ -302,6 +302,10 @@ const OPTION_GROUPS = Object.freeze({
       light: 'l',
       strong: 's',
     }),
+    enumOption('product', 'p', 'radar', ['radar', 'radar-world'], {
+      radar: 'u',
+      'radar-world': 'w',
+    }),
   ]),
   'weather-satellite': Object.freeze([
     enumOption('infrared', 'i', 'filtered', ['filtered', 'full'], {
